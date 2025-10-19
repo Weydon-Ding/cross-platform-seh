@@ -1,6 +1,6 @@
 # 跨平台结构化异常处理（SEH）
 
-> [!NOTE] AI 创作声明
+> [!NOTE]
 >
 > 本文档和代码是由 AI 协作完成的，旨在提供一个跨平台的结构化异常处理（SEH）解决方案。
 >
@@ -11,6 +11,7 @@
 该项目实现了一个跨平台的结构化异常处理（SEH）机制，原本只在 Windows 平台上支持，现在扩展到支持 POSIX 系统（如 Linux、macOS 等）。该 SEH 机制提供了一种可靠的方式来处理异常和信号，使得您的应用能够以一致的方式捕获和处理错误、异常或信号，并且跨平台兼容。
 
 > [!IMPORTANT]
+>
 > 大部分代码转载自知乎文章: [一种通用跨平台实现SEH的解决方案](https://zhuanlan.zhihu.com/p/1920929429057673090)，原作者[areslee](https://www.zhihu.com/people/aresleejian-chun)。
 >
 > 我按原作者的思路，将Windows 和 POSIX 系统的异常处理机制进行了整合，提供了一个统一的接口来处理异常。
@@ -27,6 +28,7 @@
 - [ ] 支持从异常监视区中退出函数，即return指令。
 - [ ] 增加更多的测试用例，覆盖更多的异常场景。
 - [ ] 验证移动端（Android和iOS）的支持。
+- [ ] 完善CMake构建脚本。
 
 ## 使用方法
 
@@ -43,26 +45,24 @@
 ```c
 #include "cross_platform_seh.h"
 
-// 定义一个自定义的异常过滤函数
-int my_filter(unsigned long code, PEXCEPTION_POINTERS info)
-{
-    if (code == SIGSEGV)
-    {
-        printf("捕获到段错误！\n");
-        return exception_continue_execution; // 异常处理后继续执行
-    }
-    return exception_continue_search; // 继续向上查找其他处理程序
-}
 
 int main()
 {
     TRY_START
     {
-        // 可能引发异常的代码
-        int* p = NULL;
-        *p = 42;  // 这将导致段错误
+        TRY_START
+        {
+            // 可能引发异常的代码
+            int* p = NULL;
+            *p = 42;  // 这将导致段错误
+        }
+        TRY_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            // 捕获异常并执行处理程序
+        }
+        TRY_END
     }
-    TRY_EXCEPT(my_filter)
+    TRY_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         // 捕获异常并执行处理程序
     }
@@ -94,4 +94,4 @@ int main()
 
 ## 许可证
 
-此项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+此项目采用 MIT 许可证 - 详见 [LICENSE](./LICENSE.txt) 文件。

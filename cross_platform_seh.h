@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <string.h>
 #ifdef _WIN32
 #include <Windows.h>
 #endif // _WIN32
@@ -58,11 +59,28 @@ typedef struct _EXCEPTION_NODE {
 } EXCEPTION_NODE, * PEXCEPTION_NODE;
 
 
+#ifdef __cplusplus
+    #if __cplusplus >= 201103L // C++11 及以上标准
+        #define THREAD_LOCAL thread_local
+    #else
+        #define THREAD_LOCAL __thread // 依赖编译器扩展
+    #endif
+#else
+    #if __STDC_VERSION__ >= 201112L // C11 及以上标准
+        #define THREAD_LOCAL _Thread_local
+    #else
+        #define THREAD_LOCAL __thread // 依赖编译器扩展
+    #endif
+#endif
+
 // SEH管理块（线程安全）
-static __thread struct _SEH_SET
+static THREAD_LOCAL struct _SEH_SET
 {
     PEXCEPTION_NODE Chain; // 异常块链表头指针
     struct sigaction SignalHandler, OldHandler;
+    int iSignal;
+    siginfo_t* pSignalInfo;
+    void* pContext;
     int Initialized;
 } s_Maintain = { 0 };
 
@@ -74,7 +92,6 @@ static void _ExceptionHandler(int iSignal, siginfo_t* pSignalInfo, void* pContex
     int iResult;
     PEXCEPTION_NODE pEntry, pPrev;
     EXCEPTION_POINTERS info;
-    //printf("    Got SIGSEGV at address: %lXH, %p\n", (long)pSignalInfo->si_addr, pContext);
 
     pEntry = s_Maintain.Chain; // 准备遍历注册的异常处理块
     do
@@ -82,11 +99,14 @@ static void _ExceptionHandler(int iSignal, siginfo_t* pSignalInfo, void* pContex
         // 调当前异常块的异常过滤函数
         info.ExceptionRecord = pSignalInfo;
         info.ContextRecord = pContext;
-        iResult = pEntry->FilterRoutine(iSignal, &info);
+        iResult = pEntry->FilterRoutine(iSignal, &info); // 这里故意不判断FilterRoutine是否为空，保证没使用SEH的异常也能重现
 
         switch (iResult)
         {
         case exception_execute_handler:          // 当前异常无法解决，执行善后清理工作
+            s_Maintain.iSignal = iSignal;
+            s_Maintain.pSignalInfo = pSignalInfo;
+            s_Maintain.pContext = pContext;
             s_Maintain.Chain = pEntry->Prev;     // 注销当前异常块
             siglongjmp(pEntry->SectionEntry, 1); // 跳转到注册异常块的善后清理入口
             break;
@@ -110,12 +130,65 @@ static void _ExceptionHandler(int iSignal, siginfo_t* pSignalInfo, void* pContex
 #endif
 
 
+static void ForwardSignalToOldHandler()
+{
+    // 检查全局维护结构是否有效
+    if (!s_Maintain.Initialized) {
+        return; // 未初始化，无需转发
+    }
+
+    // 转发信号给旧处理器（关键：不破坏原有逻辑，如 Bugly 的监控）
+    struct sigaction* old_act = &s_Maintain.OldHandler;
+    if (old_act->sa_flags & SA_SIGINFO)
+    {
+        // 旧处理器是扩展类型（sa_sigaction），带三个参数
+        if (old_act->sa_sigaction)
+        {
+            old_act->sa_sigaction(s_Maintain.iSignal, s_Maintain.pSignalInfo, s_Maintain.pContext);
+        }
+    }
+    else
+    {
+        // 旧处理器是简单类型（sa_handler），仅带信号编号
+        if (old_act->sa_handler == SIG_DFL)
+        {
+            // 恢复系统默认行为（终止程序+核心转储）并重新触发
+            struct sigaction def_act;
+            sigemptyset(&def_act.sa_mask);
+            def_act.sa_handler = SIG_DFL;
+            def_act.sa_flags = 0;
+            sigaction(s_Maintain.iSignal, &def_act, NULL);  // 恢复默认处理器
+            raise(s_Maintain.iSignal);  // 让系统执行默认处理（终止程序）
+        }
+        else if (old_act->sa_handler == SIG_IGN)
+        {
+            // 旧处理器是忽略信号（通常不会发生，SIGSEGV 默认不忽略）
+        }
+        else if (old_act->sa_handler)
+        {
+            // 调用旧的自定义简单处理器（如其他库注册的逻辑）
+            old_act->sa_handler(s_Maintain.iSignal);
+        }
+    }
+}
+
+
 //异常处理初始化函数，应该程序启动之后运行
 int StartSEHService(void)
 {
 #ifndef _WIN32
-    s_Maintain.SignalHandler.sa_sigaction = _ExceptionHandler;
-    //注册自己的异常处理函数
+    if (s_Maintain.Initialized)
+    {
+        return 1;
+    }
+
+    // 初始化自定义信号处理器
+    memset(&s_Maintain.SignalHandler, 0, sizeof(s_Maintain.SignalHandler)); // 清空结构体
+    sigemptyset(&s_Maintain.SignalHandler.sa_mask);                         // 信号掩码：处理 SIGSEGV 时不屏蔽其他信号
+    s_Maintain.SignalHandler.sa_flags = SA_SIGINFO;                         // 必须设置，否则 sa_sigaction 不生效
+    s_Maintain.SignalHandler.sa_sigaction = _ExceptionHandler;              // 绑定自定义处理函数
+
+    // 注册 SIGSEGV 处理器，并保存旧处理器
     if (-1 == sigaction(SIGSEGV, &s_Maintain.SignalHandler, &s_Maintain.OldHandler))
     {
         perror("Register sigaction fail");
@@ -129,7 +202,8 @@ int StartSEHService(void)
 int TerminateSEHService(void)
 {
 #ifndef _WIN32
-    sigaction(SIGSEGV, &s_Maintain.OldHandler, &s_Maintain.OldHandler); //恢复原有异常处理函数
+    sigaction(SIGSEGV, &s_Maintain.OldHandler, NULL); //恢复原有异常处理函数
+    s_Maintain.Initialized = 0;
 #endif
     return 1;
 }
@@ -167,6 +241,6 @@ int TerminateSEHService(void)
     } \
     else {/*非0/2表示是从系统异常处理程序中的longjmp函数跳转过来，在本例中表明发生了异常并无法恢复运行，处理善后工作*/
 
-#define TRY_END }}
+#define TRY_END ForwardSignalToOldHandler();}}
 
 #endif

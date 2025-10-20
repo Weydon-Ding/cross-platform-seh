@@ -22,11 +22,26 @@ void do_something_bad(int testcase)
         int c = a / b; // 这将引发除以零异常
         (void)c; // 避免未使用变量警告
     }
+    break;
     case 3:
     {
         char* p = (char*)0x12345678; // 假设这是一个无效地址
         char value = *p; // 这将引发访问违规异常
         (void)value; // 避免未使用变量警告
+    }
+    break;
+    default:
+        break;
+    }
+}
+
+void do_clean_work(int testcase)
+{
+    switch (testcase)
+    {
+    case 1:
+    {
+
     }
     default:
         break;
@@ -42,12 +57,19 @@ void Test(void)
         {
             StartSEHService();
         }
+        printf(" Test111: %p, %p\n", s_Maintain.SignalHandler.sa_sigaction, s_Maintain.OldHandler.sa_sigaction);
         __weLees_ExceptionNode.Prev = s_Maintain.Chain;
         s_Maintain.Chain = &__weLees_ExceptionNode;
         __weLees_ExceptionNode.RunStatus = __sigsetjmp(__weLees_ExceptionNode.SectionEntry, 1);
         if (2 == __weLees_ExceptionNode.RunStatus)
         {
             {
+                int* p = nullptr;
+                *p = 42; // 这将引发访问违规异常
+                int a = 1;
+                int b = 0;
+                int c = a / b; // 这将引发除以零异常
+                //(void)c; // 避免未使用变量警告
                 do_something_bad(0);
             }
             s_Maintain.Chain = __weLees_ExceptionNode.Prev;
@@ -60,8 +82,9 @@ void Test(void)
         else
         {
             {
-                //do_clean_work();
+                do_clean_work(0);
             }
+            ForwardSignalToOldHandler();
         }
     }
 }
@@ -171,7 +194,9 @@ void Test3(void)
 
 int main(void)
 {
+    Test();
     Test1();
+    do_something_bad(1);
     Test2();
     Test3();
     TerminateSEHService();
